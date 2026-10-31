@@ -1,0 +1,804 @@
+diff --git a/README.md b/README.md
+index 1abf19a..a0b4e56 100644
+--- a/README.md
++++ b/README.md
+@@ -2,7 +2,10 @@
+ 
+ Base Python para pesquisa de avaliação de investimentos e, futuramente, opções
+ reais. Esta versão implementa DCF (fluxo de caixa descontado/VPL) e análise de
+-cenários discretos. Os cálculos são executáveis e testados; não há ainda algoritmo
++cenários discretos: cada cenário tem seu próprio fluxo de caixa (investimento
++inicial, taxa de desconto e retornos) e uma probabilidade, e o valor monetário
++esperado (EMV) é a soma dos VPLs de cada cenário multiplicados pela respectiva
++probabilidade. Os cálculos são executáveis e testados; não há ainda algoritmo
+ de exercício ótimo nem agente de IA.
+ 
+ ## Executar e testar, sem instalar dependências
+@@ -30,6 +33,21 @@ PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v
+ PYTHONPATH=src .venv/bin/python -m real_options_agent
+ ```
+ 
++### Interface gráfica (Tkinter)
++
++`app.py` abre uma janela com uma aba por cenário. Em cada aba informam-se nome,
++probabilidade (%), investimento inicial, taxa de desconto (%) e os fluxos de
++caixa datados. Os botões "Add scenario" e "Remove current scenario" gerenciam as
++abas; "Calculate EMV" mostra o VPL de cada cenário, o produto probabilidade × VPL
++e o EMV total. Se as probabilidades de todos os cenários não somarem 100%, a
++interface exibe uma mensagem de erro e não calcula. Requer o Tkinter incluído
++no instalador oficial do Python (em algumas distribuições Linux: `python3-tk`).
++
++```powershell
++$env:PYTHONPATH = (Join-Path $PWD 'src')
++.\.venv\Scripts\python.exe app.py
++```
++
+ Instalação editável opcional (o pip poderá acessar a internet para obter o
+ backend de construção indicado em `pyproject.toml`):
+ 
+@@ -53,17 +71,23 @@ result = discounted_cash_flow(
+ assert round(result.present_value, 2) == 200.00
+ assert round(result.npv, 2) == 50.00
+ 
++# Cada cenário tem investimento, retornos e taxa de desconto próprios.
+ analysis = evaluate_scenarios(
+     [
+-        Scenario("downside", 0.25, (CashFlow(1, 80),), 100),
+-        Scenario("upside", 0.75, (CashFlow(1, 140),), 100),
+-    ],
+-    discount_rate=0.10,
++        Scenario("downside", 0.25, (CashFlow(1, 80),), 100, discount_rate=0.12),
++        Scenario("upside", 0.75, (CashFlow(1, 140),), 120, discount_rate=0.08),
++    ]
+ )
+-print(analysis.expected_npv)
++for outcome in analysis.outcomes:
++    print(outcome.name, outcome.discount_rate, outcome.dcf.npv, outcome.weighted_npv)
++print(analysis.emv)  # EMV = soma(probabilidade × VPL); alias de expected_npv
+ print(analysis.probability_of_loss)
+ ```
+ 
++A função `expected_monetary_value(scenarios)` devolve apenas o EMV. O parâmetro
++`discount_rate` de `evaluate_scenarios` é opcional e serve de taxa comum apenas
++para cenários que não definirem a sua própria; a taxa do cenário prevalece.
++
+ ## Convenções e limites
+ 
+ - `PV = sum(CF_t / (1 + r)**t)` e `NPV = PV - initial_investment`.
+@@ -78,23 +102,30 @@ print(analysis.probability_of_loss)
+   contábil em centavos garantida. Não há conversão de moedas, inflação, impostos,
+   valor terminal automático ou calibração da taxa de desconto.
+ - Cenários devem ser mutuamente exclusivos e exaustivos, com nomes únicos e
+-  probabilidades entre 0 e 1. A soma deve ser 1, com tolerância absoluta de 1e-9;
+-  pequenos erros aceitos são normalizados e os pesos usados aparecem no resultado.
+-- A análise retorna VPL esperado, variância populacional ponderada, desvio padrão,
+-  probabilidade de VPL estritamente negativo e extremos com probabilidade positiva.
+-  Cenários de probabilidade zero ficam no relatório, mas não afetam esses momentos
+-  ou extremos. Todos usam a mesma taxa de desconto fornecida pelo chamador.
++  probabilidades entre 0 e 1. A soma deve ser 1, com tolerância absoluta de 1e-9
++  (`PROBABILITY_TOLERANCE`); caso contrário, `ValueError` informa a soma obtida.
++  Pequenos erros aceitos são normalizados e os pesos usados aparecem no resultado.
++- Cada cenário possui investimento inicial, fluxos e taxa de desconto próprios
++  (`discount_rate`, decimal, maior que -1). Um cenário sem taxa só é aceito se
++  `evaluate_scenarios` receber uma taxa comum; sem nenhuma das duas, `ValueError`.
++- A análise retorna o EMV (`emv`/`expected_npv`), variância populacional
++  ponderada, desvio padrão, probabilidade de VPL estritamente negativo e extremos
++  com probabilidade positiva. Cenários de probabilidade zero ficam no relatório,
++  mas não afetam esses momentos ou extremos.
+ - Probabilidades são entradas, não estimativas geradas pelo programa. O VPL
+   esperado não é um preço de opção e não implica probabilidades neutras ao risco.
+ 
+-O exemplo `python -m real_options_agent` produz VPL esperado de aproximadamente
+-21,49, desvio padrão de 36,82 e probabilidade de VPL negativo de 25%.
++O exemplo `python -m real_options_agent` (taxas de 12%, 10% e 8% por cenário)
++produz EMV de aproximadamente 22,23, desvio padrão de 39,15 e probabilidade de
++VPL negativo de 25%.
+ 
+ ## Estrutura e próximos desenvolvimentos
+ 
+ - `src/real_options_agent/dcf.py`: fluxos datados e cálculo de PV/VPL.
+-- `src/real_options_agent/scenarios.py`: cenários e distribuição de resultados.
++- `src/real_options_agent/scenarios.py`: cenários com fluxo próprio, EMV e
++  distribuição de resultados.
+ - `src/real_options_agent/__main__.py`: exemplo sintético reproduzível.
++- `app.py`: interface Tkinter com uma aba por cenário e cálculo do EMV.
+ - `tests/`: verificações com resultados calculáveis à mão e entradas inválidas.
+ - `tools/package_code_behaviors.py`: criação de ZIP por lista explícita de arquivos.
+ 
+diff --git a/app.py b/app.py
+index fc3f01c..a893b0d 100644
+--- a/app.py
++++ b/app.py
+@@ -1,54 +1,91 @@
+ # SPDX-License-Identifier: AGPL-3.0-only
+ # Copyright (c) 2026 alchevaluation
+-"""English desktop interface for the real-options-agent DCF engine.
++"""English desktop interface for the real-options-agent scenario/EMV engine.
+ 
+-Run from the project root: .venv\Scripts\python.exe app.py
++Each scenario is edited in its own tab with an initial investment, a discount
++rate, dated cash flows and a probability. The expected monetary value (EMV) is
++the sum of every scenario NPV multiplied by its probability; the probabilities
++of all scenarios must add up to 100%.
++
++Run from the project root: .venv\\Scripts\\python.exe app.py
+ The project must be installed in that environment with pip install -e .
+ """
+ 
++from math import fsum, isclose
++
+ import tkinter as tk
+-from tkinter import ttk
++from tkinter import messagebox, ttk
+ 
+-from real_options_agent import CashFlow, discounted_cash_flow
++from real_options_agent import PROBABILITY_TOLERANCE, CashFlow, Scenario, evaluate_scenarios
+ 
++TITLE_FONT = ("Segoe UI", 22, "bold")
++SUBTITLE_FONT = ("Segoe UI", 12)
++RESULT_FONT = ("Segoe UI", 22, "bold")
+ 
+-class DCFApp(ttk.Frame):
+-    def __init__(self, master):
+-        super().__init__(master, padding=24)
+-        self.pack(fill="both", expand=True)
+-        self.columnconfigure(0, weight=1)
+-        self.rowconfigure(4, weight=1)
+-        self.investment = tk.StringVar(value="150")
+-        self.rate = tk.StringVar(value="10")
+-        self.time = tk.StringVar(value="3")
++# (name, probability %, initial investment, discount rate %, ((time, amount), ...))
++EXAMPLE_SCENARIOS = (
++    ("Downside", "25", "150", "12", ((1, 60), (2, 70))),
++    ("Base", "50", "150", "10", ((1, 110), (2, 121))),
++    ("Upside", "25", "150", "8", ((1, 150), (2, 180))),
++)
++
++
++def parse_number(text, label):
++    """Parse a decimal typed by the user, naming the field in the error."""
++    try:
++        return float(text.strip())
++    except ValueError as exc:
++        raise ValueError(f"{label} must be a number. Use a dot for decimals.") from exc
++
++
++def probability_error(total_fraction):
++    """Return the error text when probabilities do not add up to 100%, else None."""
++    if isclose(total_fraction, 1.0, rel_tol=0, abs_tol=PROBABILITY_TOLERANCE):
++        return None
++    return (f"The probabilities of all scenarios add up to {total_fraction * 100:.10g}%, "
++            "but they must add up to exactly 100%. Adjust the probabilities and calculate again.")
++
++
++class ScenarioTab(ttk.Frame):
++    """Editor for one scenario: probability, investment, rate and cash flows."""
++
++    def __init__(self, master, on_change, name="", probability="", investment="", rate="", flows=()):
++        super().__init__(master, padding=14)
++        self.on_change = on_change
++        self.name = tk.StringVar(value=name)
++        self.probability = tk.StringVar(value=probability)
++        self.investment = tk.StringVar(value=investment)
++        self.rate = tk.StringVar(value=rate)
++        self.time = tk.StringVar(value="1")
+         self.amount = tk.StringVar()
+-        self.pv = tk.StringVar(value="—")
+-        self.npv = tk.StringVar(value="—")
+         self.status = tk.StringVar()
+         self._build()
+-        for variable in (self.investment, self.rate):
+-            variable.trace_add("write", lambda *_: self._invalidate())
+-        self.load_example()
++        for time, amount in flows:
++            self.table.insert("", "end", values=(str(time), str(amount)))
++        for variable in (self.name, self.probability, self.investment, self.rate):
++            variable.trace_add("write", lambda *_: self.on_change())
+ 
+     def _build(self):
+-        ttk.Label(self, text="Real Options Agent", font=("Segoe UI", 22, "bold")).grid(
+-            row=0, column=0, sticky="w")
+-        ttk.Label(self, text="Discounted cash flow calculator", font=("Segoe UI", 12)).grid(
+-            row=1, column=0, sticky="w", pady=(2, 18))
++        self.columnconfigure(0, weight=1)
++        self.rowconfigure(2, weight=1)
+ 
+-        settings = ttk.LabelFrame(self, text="Project assumptions", padding=14)
+-        settings.grid(row=2, column=0, sticky="ew")
++        settings = ttk.LabelFrame(self, text="Scenario assumptions", padding=14)
++        settings.grid(row=0, column=0, sticky="ew")
+         for column in (1, 3):
+             settings.columnconfigure(column, weight=1)
+-        ttk.Label(settings, text="Initial investment").grid(row=0, column=0, sticky="w", padx=(0, 10))
+-        ttk.Entry(settings, textvariable=self.investment, width=18).grid(row=0, column=1, sticky="ew")
+-        ttk.Label(settings, text="Discount rate (%)").grid(row=0, column=2, sticky="w", padx=(24, 10))
+-        ttk.Entry(settings, textvariable=self.rate, width=18).grid(row=0, column=3, sticky="ew")
++        ttk.Label(settings, text="Scenario name").grid(row=0, column=0, sticky="w", padx=(0, 10))
++        ttk.Entry(settings, textvariable=self.name, width=18).grid(row=0, column=1, sticky="ew")
++        ttk.Label(settings, text="Probability (%)").grid(row=0, column=2, sticky="w", padx=(24, 10))
++        ttk.Entry(settings, textvariable=self.probability, width=18).grid(row=0, column=3, sticky="ew")
++        ttk.Label(settings, text="Initial investment").grid(row=1, column=0, sticky="w", padx=(0, 10), pady=(8, 0))
++        ttk.Entry(settings, textvariable=self.investment, width=18).grid(row=1, column=1, sticky="ew", pady=(8, 0))
++        ttk.Label(settings, text="Discount rate (%)").grid(row=1, column=2, sticky="w", padx=(24, 10), pady=(8, 0))
++        ttk.Entry(settings, textvariable=self.rate, width=18).grid(row=1, column=3, sticky="ew", pady=(8, 0))
+         ttk.Label(settings, text="Use one currency and the same period for the rate and cash flow times.").grid(
+-            row=1, column=0, columnspan=4, sticky="w", pady=(10, 0))
++            row=2, column=0, columnspan=4, sticky="w", pady=(10, 0))
+ 
+-        editor = ttk.Frame(self, padding=(0, 16, 0, 8))
+-        editor.grid(row=3, column=0, sticky="ew")
++        editor = ttk.Frame(self, padding=(0, 12, 0, 6))
++        editor.grid(row=1, column=0, sticky="ew")
+         ttk.Label(editor, text="Time (periods)").grid(row=0, column=0, sticky="w")
+         ttk.Label(editor, text="Cash flow amount").grid(row=0, column=1, sticky="w", padx=(12, 0))
+         ttk.Entry(editor, textvariable=self.time, width=16).grid(row=1, column=0, sticky="w", pady=4)
+@@ -59,60 +96,36 @@ class DCFApp(ttk.Frame):
+         ttk.Button(editor, text="Remove selected", command=self.remove_selected).grid(row=1, column=3)
+ 
+         table_frame = ttk.Frame(self)
+-        table_frame.grid(row=4, column=0, sticky="nsew")
++        table_frame.grid(row=2, column=0, sticky="nsew")
+         table_frame.columnconfigure(0, weight=1)
+         table_frame.rowconfigure(0, weight=1)
+-        self.table = ttk.Treeview(table_frame, columns=("time", "amount"), show="headings", height=7)
++        self.table = ttk.Treeview(table_frame, columns=("time", "amount"), show="headings", height=5)
+         self.table.heading("time", text="Time (periods)")
+         self.table.heading("amount", text="Cash flow amount")
+-        self.table.column("time", anchor="center", width=200)
+-        self.table.column("amount", anchor="e", width=350)
++        self.table.column("time", anchor="center", width=180)
++        self.table.column("amount", anchor="e", width=320)
+         self.table.grid(row=0, column=0, sticky="nsew")
+         scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=self.table.yview)
+         scrollbar.grid(row=0, column=1, sticky="ns")
+         self.table.configure(yscrollcommand=scrollbar.set)
+         self.table.bind("<Delete>", lambda _: self.remove_selected())
+ 
+-        actions = ttk.Frame(self, padding=(0, 12))
+-        actions.grid(row=5, column=0, sticky="ew")
+-        ttk.Button(actions, text="Calculate NPV", command=self.calculate).pack(side="left")
+-        ttk.Button(actions, text="Load example", command=self.load_example).pack(side="left", padx=10)
+-        ttk.Label(self, textvariable=self.status, wraplength=700).grid(row=6, column=0, sticky="w", pady=(0, 12))
+-
+-        results = ttk.LabelFrame(self, text="Results · currency units", padding=14)
+-        results.grid(row=7, column=0, sticky="ew")
+-        results.columnconfigure((0, 1), weight=1)
+-        ttk.Label(results, text="Present value of cash flows").grid(row=0, column=0, sticky="w")
+-        ttk.Label(results, text="Net present value (NPV)").grid(row=0, column=1, sticky="w")
+-        ttk.Label(results, textvariable=self.pv, font=("Segoe UI", 22, "bold")).grid(row=1, column=0, sticky="w")
+-        ttk.Label(results, textvariable=self.npv, font=("Segoe UI", 22, "bold")).grid(row=1, column=1, sticky="w")
+-        ttk.Label(self, text="Enter decimals with a dot, without thousands separators.\n"
+-                  "The initial investment is deducted at time zero; do not add it again as a cash flow.\n"
+-                  "This screen calculates DCF only. Real-option exercise decisions are not implemented.",
+-                  wraplength=710).grid(row=8, column=0, sticky="w", pady=(16, 0))
++        ttk.Label(self, textvariable=self.status, wraplength=700).grid(row=3, column=0, sticky="w", pady=(6, 0))
+ 
+-    def _invalidate(self):
+-        self.pv.set("—")
+-        self.npv.set("—")
+-        self.status.set("Inputs changed. Calculate to update the results.")
+-
+-    @staticmethod
+-    def _number(text, label):
+-        try:
+-            return float(text.strip())
+-        except ValueError as exc:
+-            raise ValueError(f"{label} must be a number. Use a dot for decimals.") from exc
++    def display_name(self, index):
++        return self.name.get().strip() or f"Scenario {index + 1}"
+ 
+     def add_flow(self):
+         try:
+-            flow = CashFlow(self._number(self.time.get(), "Time"),
+-                            self._number(self.amount.get(), "Cash flow amount"))
++            flow = CashFlow(parse_number(self.time.get(), "Time"),
++                            parse_number(self.amount.get(), "Cash flow amount"))
+         except ValueError as exc:
+             self.status.set(f"Cannot add cash flow: {exc}")
+             return
+         self.table.insert("", "end", values=(repr(flow.time), repr(flow.amount)))
+         self.amount.set("")
+-        self._invalidate()
++        self.status.set("")
++        self.on_change()
+ 
+     def remove_selected(self):
+         selected = self.table.selection()
+@@ -120,45 +133,203 @@ class DCFApp(ttk.Frame):
+             self.status.set("Select at least one cash flow to remove.")
+             return
+         self.table.delete(*selected)
++        self.status.set("")
++        self.on_change()
++
++    def cash_flows(self):
++        return [CashFlow(*(float(value) for value in self.table.item(row, "values")))
++                for row in self.table.get_children()]
++
++    def to_scenario(self, index):
++        """Build the engine Scenario from the fields; ValueError names the tab."""
++        label = self.display_name(index)
++        try:
++            probability = parse_number(self.probability.get(), "Probability (%)")
++            if not 0 <= probability <= 100:
++                raise ValueError("Probability (%) must lie between 0 and 100.")
++            investment = parse_number(self.investment.get(), "Initial investment")
++            rate = parse_number(self.rate.get(), "Discount rate (%)")
++            return Scenario(label, probability / 100, self.cash_flows(), investment, rate / 100)
++        except ValueError as exc:
++            raise ValueError(f"{label}: {exc}") from exc
++
++
++class EMVApp(ttk.Frame):
++    def __init__(self, master):
++        super().__init__(master, padding=24)
++        self.pack(fill="both", expand=True)
++        self.columnconfigure(0, weight=1)
++        self.rowconfigure(3, weight=1)
++        self.tabs = []
++        self.emv = tk.StringVar(value="—")
++        self.total_probability = tk.StringVar(value="—")
++        self.probability_of_loss = tk.StringVar(value="—")
++        self.standard_deviation = tk.StringVar(value="—")
++        self.status = tk.StringVar()
++        self._build()
++        self.load_example()
++
++    def _build(self):
++        ttk.Label(self, text="Real Options Agent", font=TITLE_FONT).grid(row=0, column=0, sticky="w")
++        ttk.Label(self, text="Scenario NPV and expected monetary value (EMV) calculator",
++                  font=SUBTITLE_FONT).grid(row=1, column=0, sticky="w", pady=(2, 14))
++
++        toolbar = ttk.Frame(self)
++        toolbar.grid(row=2, column=0, sticky="ew", pady=(0, 6))
++        ttk.Button(toolbar, text="Add scenario", command=self.add_scenario).pack(side="left")
++        ttk.Button(toolbar, text="Remove current scenario", command=self.remove_scenario).pack(
++            side="left", padx=10)
++        ttk.Button(toolbar, text="Load example", command=self.load_example).pack(side="left")
++
++        self.notebook = ttk.Notebook(self)
++        self.notebook.grid(row=3, column=0, sticky="nsew")
++
++        actions = ttk.Frame(self, padding=(0, 12, 0, 4))
++        actions.grid(row=4, column=0, sticky="ew")
++        ttk.Button(actions, text="Calculate EMV", command=self.calculate).pack(side="left")
++        ttk.Label(self, textvariable=self.status, wraplength=760).grid(row=5, column=0, sticky="w", pady=(0, 10))
++
++        results = ttk.LabelFrame(self, text="Results · currency units", padding=14)
++        results.grid(row=6, column=0, sticky="ew")
++        results.columnconfigure(0, weight=1)
++        self.summary = ttk.Treeview(
++            results, columns=("scenario", "probability", "investment", "rate", "npv", "weighted"),
++            show="headings", height=4)
++        for column, heading, anchor, width in (
++                ("scenario", "Scenario", "w", 160),
++                ("probability", "Probability", "e", 90),
++                ("investment", "Investment", "e", 110),
++                ("rate", "Rate", "e", 70),
++                ("npv", "NPV", "e", 120),
++                ("weighted", "Probability × NPV", "e", 140)):
++            self.summary.heading(column, text=heading)
++            self.summary.column(column, anchor=anchor, width=width, stretch=column == "scenario")
++        self.summary.grid(row=0, column=0, columnspan=3, sticky="ew")
++
++        ttk.Label(results, text="Expected monetary value (EMV)").grid(row=1, column=0, sticky="w", pady=(12, 0))
++        ttk.Label(results, textvariable=self.emv, font=RESULT_FONT).grid(row=2, column=0, sticky="w")
++        details = ttk.Frame(results)
++        details.grid(row=1, column=1, rowspan=2, columnspan=2, sticky="e")
++        for row, (caption, variable) in enumerate((
++                ("Sum of probabilities", self.total_probability),
++                ("Probability of negative NPV", self.probability_of_loss),
++                ("NPV standard deviation", self.standard_deviation))):
++            ttk.Label(details, text=caption).grid(row=row, column=0, sticky="w", padx=(0, 12))
++            ttk.Label(details, textvariable=variable).grid(row=row, column=1, sticky="e")
++
++        ttk.Label(self, text="Enter decimals with a dot, without thousands separators. Probabilities and rates are in percent.\n"
++                  "Each scenario has its own investment (deducted at time zero), discount rate and cash flows.\n"
++                  "EMV = Σ probability × NPV over mutually exclusive scenarios whose probabilities add up to 100%.",
++                  wraplength=760).grid(row=7, column=0, sticky="w", pady=(16, 0))
++
++    # Scenario management ---------------------------------------------------
++
++    def add_scenario(self, *args, select=True):
++        tab = ScenarioTab(self.notebook, self._invalidate, *args)
++        self.tabs.append(tab)
++        self.notebook.add(tab, text=tab.display_name(len(self.tabs) - 1))
++        if select:
++            self.notebook.select(tab)
++        self._invalidate()
++        return tab
++
++    def _current_tab(self):
++        current = self.notebook.select()
++        for tab in self.tabs:
++            if str(tab) == current:
++                return tab
++        return None
++
++    def remove_scenario(self):
++        tab = self._current_tab()
++        if tab is None:
++            self.status.set("Select a scenario to remove.")
++            return
++        if len(self.tabs) == 1:
++            self.status.set("Keep at least one scenario. Edit it instead of removing it.")
++            return
++        self.notebook.forget(tab)
++        self.tabs.remove(tab)
++        tab.destroy()
+         self._invalidate()
+ 
++    def _clear_scenarios(self):
++        for tab in self.tabs:
++            self.notebook.forget(tab)
++            tab.destroy()
++        self.tabs = []
++
+     def load_example(self):
+-        self.investment.set("150")
+-        self.rate.set("10")
+-        self.time.set("3")
+-        self.amount.set("")
+-        children = self.table.get_children()
+-        if children:
+-            self.table.delete(*children)
+-        for time, amount in ((1, 110), (2, 121)):
+-            self.table.insert("", "end", values=(str(time), str(amount)))
++        self._clear_scenarios()
++        for scenario in EXAMPLE_SCENARIOS:
++            self.add_scenario(*scenario, select=False)
++        if self.tabs:
++            self.notebook.select(self.tabs[0])
+         self.calculate()
+ 
++    # Results ---------------------------------------------------------------
++
++    def _refresh_tab_titles(self):
++        for index, tab in enumerate(self.tabs):
++            self.notebook.tab(tab, text=tab.display_name(index))
++
++    def _invalidate(self):
++        self._refresh_tab_titles()
++        for variable in (self.emv, self.total_probability, self.probability_of_loss, self.standard_deviation):
++            variable.set("—")
++        children = self.summary.get_children()
++        if children:
++            self.summary.delete(*children)
++        self.status.set("Inputs changed. Calculate to update the results.")
++
++    def _report_error(self, title, message):
++        self.status.set(f"Cannot calculate: {message}")
++        messagebox.showerror(title, message, parent=self)
++
+     def calculate(self):
+         self._invalidate()
+         try:
+-            flows = [CashFlow(*(float(value) for value in self.table.item(row, "values")))
+-                     for row in self.table.get_children()]
+-            result = discounted_cash_flow(
+-                flows, self._number(self.rate.get(), "Discount rate") / 100,
+-                self._number(self.investment.get(), "Initial investment"))
++            scenarios = [tab.to_scenario(index) for index, tab in enumerate(self.tabs)]
++            if not scenarios:
++                raise ValueError("Add at least one scenario.")
++            names = [scenario.name for scenario in scenarios]
++            duplicated = next((name for name in names if names.count(name) > 1), None)
++            if duplicated is not None:
++                raise ValueError(f"Scenario names must be unique: '{duplicated}' is used more than once.")
++        except ValueError as exc:
++            self._report_error("Invalid scenario input", str(exc))
++            return
++        error = probability_error(fsum(scenario.probability for scenario in scenarios))
++        if error:
++            self._report_error("Probabilities must add up to 100%", error)
++            return
++        try:
++            analysis = evaluate_scenarios(scenarios)
+         except ValueError as exc:
+-            self.status.set(f"Cannot calculate: {exc}")
++            self._report_error("Cannot calculate EMV", str(exc))
+             return
+-        self.pv.set(f"{result.present_value:,.2f}")
+-        self.npv.set(f"{result.npv:,.2f}")
+-        self.status.set(f"Calculated using {len(flows)} cash flow(s). NPV = present value − initial investment.")
++        for outcome in analysis.outcomes:
++            self.summary.insert("", "end", values=(
++                outcome.name, f"{outcome.probability:.2%}", f"{outcome.dcf.initial_investment:,.2f}",
++                f"{outcome.discount_rate:.2%}", f"{outcome.dcf.npv:,.2f}",
++                f"{outcome.weighted_npv + 0.0:,.2f}"))  # + 0.0 avoids printing -0.00
++        self.emv.set(f"{analysis.emv:,.2f}")
++        self.total_probability.set(f"{fsum(o.probability for o in analysis.outcomes):.2%}")
++        self.probability_of_loss.set(f"{analysis.probability_of_loss:.2%}")
++        self.standard_deviation.set(f"{analysis.standard_deviation:,.2f}")
++        self.status.set(f"EMV calculated from {len(scenarios)} scenario(s): "
++                        "sum of each scenario NPV multiplied by its probability.")
+ 
+ 
+ def main():
+     root = tk.Tk()
+-    root.title("Real Options Agent | DCF Calculator")
+-    root.geometry("820x740")
+-    root.minsize(780, 720)
++    root.title("Real Options Agent | Scenario EMV Calculator")
++    root.geometry("900x860")
++    root.minsize(820, 800)
+     style = ttk.Style(root)
+     if "vista" in style.theme_names():
+         style.theme_use("vista")
+-    DCFApp(root)
++    EMVApp(root)
+     root.mainloop()
+ 
+ 
+diff --git a/real-options-agent-emv.zip b/real-options-agent-emv.zip
+new file mode 100644
+index 0000000..6b90188
+Binary files /dev/null and b/real-options-agent-emv.zip differ
+diff --git a/src/real_options_agent/__init__.py b/src/real_options_agent/__init__.py
+index 76905aa..bbf8d5b 100644
+--- a/src/real_options_agent/__init__.py
++++ b/src/real_options_agent/__init__.py
+@@ -1,9 +1,17 @@
+ """DCF and discrete scenario foundations for a future real-options engine."""
+ 
+ from .dcf import CashFlow, DCFResult, discounted_cash_flow
+-from .scenarios import Scenario, ScenarioAnalysis, ScenarioResult, evaluate_scenarios
++from .scenarios import (
++    PROBABILITY_TOLERANCE,
++    Scenario,
++    ScenarioAnalysis,
++    ScenarioResult,
++    evaluate_scenarios,
++    expected_monetary_value,
++)
+ 
+ __all__ = [
+-    "CashFlow", "DCFResult", "discounted_cash_flow", "Scenario",
+-    "ScenarioAnalysis", "ScenarioResult", "evaluate_scenarios",
++    "CashFlow", "DCFResult", "discounted_cash_flow", "PROBABILITY_TOLERANCE",
++    "Scenario", "ScenarioAnalysis", "ScenarioResult", "evaluate_scenarios",
++    "expected_monetary_value",
+ ]
+diff --git a/src/real_options_agent/__main__.py b/src/real_options_agent/__main__.py
+index 86744f6..67da0f7 100644
+--- a/src/real_options_agent/__main__.py
++++ b/src/real_options_agent/__main__.py
+@@ -4,16 +4,21 @@ from . import CashFlow, Scenario, evaluate_scenarios
+ 
+ 
+ def main() -> None:
++    # Each scenario has its own investment, returns and discount rate.
+     scenarios = [
+-        Scenario("downside", 0.25, (CashFlow(1, 40), CashFlow(2, 40)), 100),
+-        Scenario("base", 0.50, (CashFlow(1, 70), CashFlow(2, 70)), 100),
+-        Scenario("upside", 0.25, (CashFlow(1, 100), CashFlow(2, 100)), 100),
++        Scenario("downside", 0.25, (CashFlow(1, 40), CashFlow(2, 40)), 100, discount_rate=0.12),
++        Scenario("base", 0.50, (CashFlow(1, 70), CashFlow(2, 70)), 100, discount_rate=0.10),
++        Scenario("upside", 0.25, (CashFlow(1, 100), CashFlow(2, 100)), 100, discount_rate=0.08),
+     ]
+-    result = evaluate_scenarios(scenarios, discount_rate=0.10)
+-    print("Synthetic project | effective annual discount rate: 10%")
++    result = evaluate_scenarios(scenarios)
++    print("Synthetic project | one cash flow and discount rate per scenario")
+     for outcome in result.outcomes:
+-        print(f"{outcome.name}: probability={outcome.probability:.0%}, NPV={outcome.dcf.npv:.2f}")
+-    print(f"Expected NPV: {result.expected_npv:.2f}")
++        print(
++            f"{outcome.name}: probability={outcome.probability:.0%}, "
++            f"rate={outcome.discount_rate:.0%}, NPV={outcome.dcf.npv:.2f}, "
++            f"probability x NPV={outcome.weighted_npv:.2f}"
++        )
++    print(f"Expected monetary value (EMV): {result.emv:.2f}")
+     print(f"NPV standard deviation: {result.standard_deviation:.2f}")
+     print(f"Probability of negative NPV: {result.probability_of_loss:.0%}")
+ 
+diff --git a/src/real_options_agent/scenarios.py b/src/real_options_agent/scenarios.py
+index df8ba3f..4784f7e 100644
+--- a/src/real_options_agent/scenarios.py
++++ b/src/real_options_agent/scenarios.py
+@@ -1,4 +1,9 @@
+-"""Probability-weighted outcomes for mutually exclusive project scenarios."""
++"""Probability-weighted outcomes for mutually exclusive project scenarios.
++
++Each scenario carries its own cash flow: initial investment, dated returns and
++discount rate. The expected monetary value (EMV) is the probability-weighted
++sum of the scenario NPVs, and the probabilities must add up to one.
++"""
+ 
+ from dataclasses import dataclass
+ from math import fsum, isclose, isfinite, sqrt
+@@ -6,13 +11,24 @@ from typing import Iterable
+ 
+ from .dcf import CashFlow, DCFResult, _finite_real, discounted_cash_flow
+ 
++PROBABILITY_TOLERANCE = 1e-9
++"""Absolute tolerance accepted when checking that probabilities sum to one."""
++
+ 
+ @dataclass(frozen=True)
+ class Scenario:
++    """One mutually exclusive outcome with its own complete cash flow.
++
++    ``discount_rate`` is the effective rate per period of this scenario, in
++    decimal. It may be left as ``None`` only when a common rate is passed to
++    :func:`evaluate_scenarios`; a rate set here always takes precedence.
++    """
++
+     name: str
+     probability: float
+     cash_flows: tuple[CashFlow, ...]
+     initial_investment: float = 0.0
++    discount_rate: float | None = None
+ 
+     def __post_init__(self) -> None:
+         if not isinstance(self.name, str) or not self.name.strip():
+@@ -23,6 +39,11 @@ class Scenario:
+             raise ValueError("probability must lie between 0 and 1")
+         if investment < 0:
+             raise ValueError("initial_investment must be nonnegative")
++        rate = self.discount_rate
++        if rate is not None:
++            rate = _finite_real(rate, "discount_rate")
++            if rate <= -1:
++                raise ValueError("discount_rate must be greater than -1")
+         flows = tuple(self.cash_flows)
+         if any(not isinstance(flow, CashFlow) for flow in flows):
+             raise ValueError("cash_flows must contain CashFlow objects")
+@@ -30,14 +51,21 @@ class Scenario:
+         object.__setattr__(self, "probability", probability)
+         object.__setattr__(self, "cash_flows", flows)
+         object.__setattr__(self, "initial_investment", investment)
++        object.__setattr__(self, "discount_rate", rate)
+ 
+ 
+ @dataclass(frozen=True)
+ class ScenarioResult:
+     name: str
+     probability: float
++    discount_rate: float
+     dcf: DCFResult
+ 
++    @property
++    def weighted_npv(self) -> float:
++        """Contribution of this scenario to the EMV: probability × NPV."""
++        return self.probability * self.dcf.npv
++
+ 
+ @dataclass(frozen=True)
+ class ScenarioAnalysis:
+@@ -49,12 +77,19 @@ class ScenarioAnalysis:
+     minimum_npv: float
+     maximum_npv: float
+ 
++    @property
++    def emv(self) -> float:
++        """Expected monetary value: sum of probability × NPV over scenarios."""
++        return self.expected_npv
++
+ 
+ def evaluate_scenarios(
+-    scenarios: Iterable[Scenario], discount_rate: float
++    scenarios: Iterable[Scenario], discount_rate: float | None = None
+ ) -> ScenarioAnalysis:
+-    """Evaluate an exhaustive scenario set with a common discount rate.
++    """Evaluate an exhaustive scenario set, each with its own cash flow.
+ 
++    Every scenario is discounted with its own ``discount_rate``; ``discount_rate``
++    given here is only a fallback for scenarios that do not define one.
+     Probabilities must sum to one within absolute tolerance 1e-9. Accepted
+     rounding errors are normalized; zero-probability outcomes are retained
+     but excluded from the minimum and maximum possible NPVs.
+@@ -66,19 +101,30 @@ def evaluate_scenarios(
+         raise ValueError("scenarios must contain Scenario objects")
+     if len({item.name for item in items}) != len(items):
+         raise ValueError("scenario names must be unique")
++    if discount_rate is not None:
++        discount_rate = _finite_real(discount_rate, "discount_rate")
+     total = fsum(item.probability for item in items)
+-    if not isclose(total, 1.0, rel_tol=0, abs_tol=1e-9):
+-        raise ValueError("scenario probabilities must sum to 1")
+-    outcomes = tuple(
+-        ScenarioResult(
+-            item.name, item.probability / total,
+-            discounted_cash_flow(item.cash_flows, discount_rate, item.initial_investment),
++    if not isclose(total, 1.0, rel_tol=0, abs_tol=PROBABILITY_TOLERANCE):
++        raise ValueError(
++            f"scenario probabilities must sum to 1 (they sum to {total:.10g})"
+         )
+-        for item in items
+-    )
++    outcomes = []
++    for item in items:
++        rate = discount_rate if item.discount_rate is None else item.discount_rate
++        if rate is None:
++            raise ValueError(
++                f"scenario {item.name!r} has no discount_rate and no common rate was given"
++            )
++        outcomes.append(
++            ScenarioResult(
++                item.name, item.probability / total, rate,
++                discounted_cash_flow(item.cash_flows, rate, item.initial_investment),
++            )
++        )
++    outcomes = tuple(outcomes)
+     possible = tuple(outcome for outcome in outcomes if outcome.probability > 0)
+     try:
+-        expected = fsum(item.probability * item.dcf.npv for item in possible)
++        expected = fsum(item.weighted_npv for item in possible)
+         variance = fsum(
+             item.probability * (item.dcf.npv - expected) ** 2 for item in possible
+         )
+@@ -92,3 +138,10 @@ def evaluate_scenarios(
+         min(item.dcf.npv for item in possible),
+         max(item.dcf.npv for item in possible),
+     )
++
++
++def expected_monetary_value(
++    scenarios: Iterable[Scenario], discount_rate: float | None = None
++) -> float:
++    """EMV = sum(probability_i × NPV_i); probabilities must sum to one."""
++    return evaluate_scenarios(scenarios, discount_rate).expected_npv
+diff --git a/tests/test_scenarios.py b/tests/test_scenarios.py
+index e8b91fa..5f023d9 100644
+--- a/tests/test_scenarios.py
++++ b/tests/test_scenarios.py
+@@ -1,6 +1,6 @@
+ import unittest
+ 
+-from real_options_agent import CashFlow, Scenario, evaluate_scenarios
++from real_options_agent import CashFlow, Scenario, evaluate_scenarios, expected_monetary_value
+ 
+ 
+ def outcome(name, probability, npv):
+@@ -69,3 +69,50 @@ class ScenarioTests(unittest.TestCase):
+     def test_numerical_range_rejected(self):
+         with self.assertRaises(ValueError):
+             evaluate_scenarios([outcome("a", 0.5, -1e308), outcome("b", 0.5, 1e308)], 0)
++
++
++class PerScenarioCashFlowTests(unittest.TestCase):
++    """Each scenario carries its own investment, returns and discount rate."""
++
++    def test_hand_calculated_emv_with_different_rates(self):
++        # low: 100 invested, 110 at t=1 discounted at 10% -> NPV 0
++        # high: 50 invested, 120 at t=1 discounted at 20% -> NPV 50
++        scenarios = [
++            Scenario("low", 0.4, (CashFlow(1, 110),), 100, discount_rate=0.10),
++            Scenario("high", 0.6, (CashFlow(1, 120),), 50, discount_rate=0.20),
++        ]
++        result = evaluate_scenarios(scenarios)
++        self.assertAlmostEqual(result.outcomes[0].dcf.npv, 0)
++        self.assertAlmostEqual(result.outcomes[1].dcf.npv, 50)
++        self.assertEqual(result.outcomes[0].discount_rate, 0.10)
++        self.assertEqual(result.outcomes[1].discount_rate, 0.20)
++        self.assertAlmostEqual(result.outcomes[1].weighted_npv, 30)
++        self.assertAlmostEqual(result.emv, 30)
++        self.assertEqual(result.emv, result.expected_npv)
++        self.assertAlmostEqual(expected_monetary_value(scenarios), 30)
++
++    def test_scenario_rate_takes_precedence_over_common_rate(self):
++        own = Scenario("own", 0.5, (CashFlow(1, 100),), 0, discount_rate=0.0)
++        shared = Scenario("shared", 0.5, (CashFlow(1, 100),), 0)
++        result = evaluate_scenarios([own, shared], discount_rate=1.0)
++        self.assertEqual(result.outcomes[0].dcf.npv, 100)
++        self.assertEqual(result.outcomes[1].dcf.npv, 50)
++        self.assertEqual(result.outcomes[1].discount_rate, 1.0)
++
++    def test_missing_rate_is_rejected(self):
++        with self.assertRaises(ValueError):
++            evaluate_scenarios([Scenario("a", 1, (CashFlow(1, 1),))])
++
++    def test_invalid_scenario_rate(self):
++        for rate in [-1, float("nan"), float("inf"), True, "0.1"]:
++            with self.subTest(rate=rate), self.assertRaises(ValueError):
++                Scenario("a", 1, (), 0, discount_rate=rate)
++
++    def test_probabilities_not_summing_to_one_report_total(self):
++        scenarios = [
++            Scenario("a", 0.3, (), 0, discount_rate=0.1),
++            Scenario("b", 0.3, (), 0, discount_rate=0.1),
++        ]
++        with self.assertRaises(ValueError) as ctx:
++            expected_monetary_value(scenarios)
++        self.assertIn("0.6", str(ctx.exception))

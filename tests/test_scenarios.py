@@ -1,6 +1,6 @@
 import unittest
 
-from real_options_agent import CashFlow, Scenario, evaluate_scenarios
+from real_options_agent import CashFlow, Scenario, evaluate_scenarios, expected_monetary_value
 
 
 def outcome(name, probability, npv):
@@ -69,3 +69,50 @@ class ScenarioTests(unittest.TestCase):
     def test_numerical_range_rejected(self):
         with self.assertRaises(ValueError):
             evaluate_scenarios([outcome("a", 0.5, -1e308), outcome("b", 0.5, 1e308)], 0)
+
+
+class PerScenarioCashFlowTests(unittest.TestCase):
+    """Each scenario carries its own investment, returns and discount rate."""
+
+    def test_hand_calculated_emv_with_different_rates(self):
+        # low: 100 invested, 110 at t=1 discounted at 10% -> NPV 0
+        # high: 50 invested, 120 at t=1 discounted at 20% -> NPV 50
+        scenarios = [
+            Scenario("low", 0.4, (CashFlow(1, 110),), 100, discount_rate=0.10),
+            Scenario("high", 0.6, (CashFlow(1, 120),), 50, discount_rate=0.20),
+        ]
+        result = evaluate_scenarios(scenarios)
+        self.assertAlmostEqual(result.outcomes[0].dcf.npv, 0)
+        self.assertAlmostEqual(result.outcomes[1].dcf.npv, 50)
+        self.assertEqual(result.outcomes[0].discount_rate, 0.10)
+        self.assertEqual(result.outcomes[1].discount_rate, 0.20)
+        self.assertAlmostEqual(result.outcomes[1].weighted_npv, 30)
+        self.assertAlmostEqual(result.emv, 30)
+        self.assertEqual(result.emv, result.expected_npv)
+        self.assertAlmostEqual(expected_monetary_value(scenarios), 30)
+
+    def test_scenario_rate_takes_precedence_over_common_rate(self):
+        own = Scenario("own", 0.5, (CashFlow(1, 100),), 0, discount_rate=0.0)
+        shared = Scenario("shared", 0.5, (CashFlow(1, 100),), 0)
+        result = evaluate_scenarios([own, shared], discount_rate=1.0)
+        self.assertEqual(result.outcomes[0].dcf.npv, 100)
+        self.assertEqual(result.outcomes[1].dcf.npv, 50)
+        self.assertEqual(result.outcomes[1].discount_rate, 1.0)
+
+    def test_missing_rate_is_rejected(self):
+        with self.assertRaises(ValueError):
+            evaluate_scenarios([Scenario("a", 1, (CashFlow(1, 1),))])
+
+    def test_invalid_scenario_rate(self):
+        for rate in [-1, float("nan"), float("inf"), True, "0.1"]:
+            with self.subTest(rate=rate), self.assertRaises(ValueError):
+                Scenario("a", 1, (), 0, discount_rate=rate)
+
+    def test_probabilities_not_summing_to_one_report_total(self):
+        scenarios = [
+            Scenario("a", 0.3, (), 0, discount_rate=0.1),
+            Scenario("b", 0.3, (), 0, discount_rate=0.1),
+        ]
+        with self.assertRaises(ValueError) as ctx:
+            expected_monetary_value(scenarios)
+        self.assertIn("0.6", str(ctx.exception))

@@ -2,7 +2,10 @@
 
 Base Python para pesquisa de avaliação de investimentos e, futuramente, opções
 reais. Esta versão implementa DCF (fluxo de caixa descontado/VPL) e análise de
-cenários discretos. Os cálculos são executáveis e testados; não há ainda algoritmo
+cenários discretos: cada cenário tem seu próprio fluxo de caixa (investimento
+inicial, taxa de desconto e retornos) e uma probabilidade, e o valor monetário
+esperado (EMV) é a soma dos VPLs de cada cenário multiplicados pela respectiva
+probabilidade. Os cálculos são executáveis e testados; não há ainda algoritmo
 de exercício ótimo nem agente de IA.
 
 ## Executar e testar, sem instalar dependências
@@ -30,6 +33,21 @@ PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v
 PYTHONPATH=src .venv/bin/python -m real_options_agent
 ```
 
+### Interface gráfica (Tkinter)
+
+`app.py` abre uma janela com uma aba por cenário. Em cada aba informam-se nome,
+probabilidade (%), investimento inicial, taxa de desconto (%) e os fluxos de
+caixa datados. Os botões "Add scenario" e "Remove current scenario" gerenciam as
+abas; "Calculate EMV" mostra o VPL de cada cenário, o produto probabilidade × VPL
+e o EMV total. Se as probabilidades de todos os cenários não somarem 100%, a
+interface exibe uma mensagem de erro e não calcula. Requer o Tkinter incluído
+no instalador oficial do Python (em algumas distribuições Linux: `python3-tk`).
+
+```powershell
+$env:PYTHONPATH = (Join-Path $PWD 'src')
+.\.venv\Scripts\python.exe app.py
+```
+
 Instalação editável opcional (o pip poderá acessar a internet para obter o
 backend de construção indicado em `pyproject.toml`):
 
@@ -53,16 +71,22 @@ result = discounted_cash_flow(
 assert round(result.present_value, 2) == 200.00
 assert round(result.npv, 2) == 50.00
 
+# Cada cenário tem investimento, retornos e taxa de desconto próprios.
 analysis = evaluate_scenarios(
     [
-        Scenario("downside", 0.25, (CashFlow(1, 80),), 100),
-        Scenario("upside", 0.75, (CashFlow(1, 140),), 100),
-    ],
-    discount_rate=0.10,
+        Scenario("downside", 0.25, (CashFlow(1, 80),), 100, discount_rate=0.12),
+        Scenario("upside", 0.75, (CashFlow(1, 140),), 120, discount_rate=0.08),
+    ]
 )
-print(analysis.expected_npv)
+for outcome in analysis.outcomes:
+    print(outcome.name, outcome.discount_rate, outcome.dcf.npv, outcome.weighted_npv)
+print(analysis.emv)  # EMV = soma(probabilidade × VPL); alias de expected_npv
 print(analysis.probability_of_loss)
 ```
+
+A função `expected_monetary_value(scenarios)` devolve apenas o EMV. O parâmetro
+`discount_rate` de `evaluate_scenarios` é opcional e serve de taxa comum apenas
+para cenários que não definirem a sua própria; a taxa do cenário prevalece.
 
 ## Convenções e limites
 
@@ -78,23 +102,30 @@ print(analysis.probability_of_loss)
   contábil em centavos garantida. Não há conversão de moedas, inflação, impostos,
   valor terminal automático ou calibração da taxa de desconto.
 - Cenários devem ser mutuamente exclusivos e exaustivos, com nomes únicos e
-  probabilidades entre 0 e 1. A soma deve ser 1, com tolerância absoluta de 1e-9;
-  pequenos erros aceitos são normalizados e os pesos usados aparecem no resultado.
-- A análise retorna VPL esperado, variância populacional ponderada, desvio padrão,
-  probabilidade de VPL estritamente negativo e extremos com probabilidade positiva.
-  Cenários de probabilidade zero ficam no relatório, mas não afetam esses momentos
-  ou extremos. Todos usam a mesma taxa de desconto fornecida pelo chamador.
+  probabilidades entre 0 e 1. A soma deve ser 1, com tolerância absoluta de 1e-9
+  (`PROBABILITY_TOLERANCE`); caso contrário, `ValueError` informa a soma obtida.
+  Pequenos erros aceitos são normalizados e os pesos usados aparecem no resultado.
+- Cada cenário possui investimento inicial, fluxos e taxa de desconto próprios
+  (`discount_rate`, decimal, maior que -1). Um cenário sem taxa só é aceito se
+  `evaluate_scenarios` receber uma taxa comum; sem nenhuma das duas, `ValueError`.
+- A análise retorna o EMV (`emv`/`expected_npv`), variância populacional
+  ponderada, desvio padrão, probabilidade de VPL estritamente negativo e extremos
+  com probabilidade positiva. Cenários de probabilidade zero ficam no relatório,
+  mas não afetam esses momentos ou extremos.
 - Probabilidades são entradas, não estimativas geradas pelo programa. O VPL
   esperado não é um preço de opção e não implica probabilidades neutras ao risco.
 
-O exemplo `python -m real_options_agent` produz VPL esperado de aproximadamente
-21,49, desvio padrão de 36,82 e probabilidade de VPL negativo de 25%.
+O exemplo `python -m real_options_agent` (taxas de 12%, 10% e 8% por cenário)
+produz EMV de aproximadamente 22,23, desvio padrão de 39,15 e probabilidade de
+VPL negativo de 25%.
 
 ## Estrutura e próximos desenvolvimentos
 
 - `src/real_options_agent/dcf.py`: fluxos datados e cálculo de PV/VPL.
-- `src/real_options_agent/scenarios.py`: cenários e distribuição de resultados.
+- `src/real_options_agent/scenarios.py`: cenários com fluxo próprio, EMV e
+  distribuição de resultados.
 - `src/real_options_agent/__main__.py`: exemplo sintético reproduzível.
+- `app.py`: interface Tkinter com uma aba por cenário e cálculo do EMV.
 - `tests/`: verificações com resultados calculáveis à mão e entradas inválidas.
 - `tools/package_code_behaviors.py`: criação de ZIP por lista explícita de arquivos.
 
